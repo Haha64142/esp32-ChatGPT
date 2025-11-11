@@ -33,9 +33,7 @@ void setup() {
 
 void loop() {
   String input = getInput("\nPlease enter your message");
-  if (input.endsWith("\n")) {
-    input.remove(input.length() - 1);
-  }
+  input.trim();
   if (input == "") {
     Serial.println("Cannot send an empty string. Use --help for help");
     return;
@@ -210,7 +208,6 @@ void ScanWiFi() {
   Serial.println("-------------------------------------");
   Serial.println("Scan start");
   WiFi.disconnect(true);
-  WiFi.STA.begin();
   // WiFi.scanNetworks will return the number of networks found.
   int n = WiFi.scanNetworks();
   Serial.println("Scan done");
