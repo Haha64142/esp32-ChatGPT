@@ -4,10 +4,12 @@
 #include "secrets.h"
 
 HTTPClient http;
-JsonDocument inputDoc;
+JsonDocument messageDoc;
 
-// Setup functions with default values
+String model = "openai/gpt-4.1-mini";
+
 String getInput(const char* message = "");
+// Setup functions with default values
 
 void setup() {
   Serial.begin(115200);
@@ -15,8 +17,18 @@ void setup() {
   delay(1000);
   Serial.print("\n");
 
-  setupWifi(WIFI_SSID, WIFI_PASSWORD);
-  setupInputDoc();
+  String ssid;
+  String password;
+  bool connected = setupWifi(WIFI_SSID, WIFI_PASSWORD);
+  while (!connected) {
+    ScanWiFi();
+
+    ssid = getInput("Please enter the WiFi SSID you would like to connect to");
+    password = getInput("Please enter the password for the network");
+
+    connected = setupWifi(ssid.c_str(), password.c_str());
+  }
+  setupMessageDoc();
 }
 
 void loop() {
@@ -36,12 +48,12 @@ void loop() {
           displayHelp();
           return;
 
-        case 'c': // option:  -c             reset inputDoc
-          setupInputDoc();
+        case 'c':   // option:  -c             reset messageDoc
+          setupMessageDoc();
           Serial.println("Conversation reset");
           return;
         
-        case 'r': { // option: -r [<count>]    remove the specified number of elements (default 1)
+        case 'r': { // option:  -r [<count>]   remove the specified number of elements (default 1)
           input = input.substring(input.indexOf(' ') + 1); // Remove the option and space
 
           // Get the count (uses consecutive digits)
@@ -59,7 +71,7 @@ void loop() {
             countStr = "1";
           }
 
-          const int messagesDeleted = removeMessages(inputDoc, countStr.toInt());
+          const int messagesDeleted = removeMessages(messageDoc, countStr.toInt());
           Serial.print(messagesDeleted);
           Serial.print(" message");
           if (messagesDeleted != 1) Serial.print("s"); // Make plural if needed
@@ -67,60 +79,85 @@ void loop() {
           return;
         }
         
-        case 'u': // option  -u              send as a user
+        case 'u':  // option:  -u              send as a user
           input = input.substring(input.indexOf(' ') + 1); // Remove the option and space
-          addMessage(inputDoc, "user", input.c_str());
+          addMessage(messageDoc, "user", input.c_str());
           Serial.println("Message added as user");
           return;
 
-        case 'd': // option:  -d <message>    send as a developer
+        case 'd':  // option:  -d <message>    send as a developer
           input = input.substring(input.indexOf(' ') + 1); // Remove the option and space
-          addMessage(inputDoc, "developer", input.c_str());
+          addMessage(messageDoc, "developer", input.c_str());
           Serial.println("Message added as developer");
           return;
 
-        case 'a': // option:  -a <message>    send as the ai (assistant)
+        case 'a':  // option:  -a <message>    send as the ai (assistant)
           input = input.substring(input.indexOf(' ') + 1); // Remove the option and space
-          addMessage(inputDoc, "assistant", input.c_str());
+          addMessage(messageDoc, "assistant", input.c_str());
           Serial.println("Message added as assistant");
           return;
         
-        case 'p': // option:  -p              print the conversation as JSON
-          serializeJsonPretty(inputDoc, Serial);
+        case 'm': { // option:  -m [<model>]   set the ai model (omit argument to display the current model)
+          input.concat(" ");
+          input = input.substring(input.indexOf(' ') + 1);
+          String newModel = input.substring(0, input.indexOf(' '));
+
+          if (newModel == "") {
+            Serial.print("Current model: ");
+            Serial.println(model);
+            return;
+          }
+
+          model = newModel;
+          messageDoc["model"] = model;
+          Serial.print("Model set: ");
+          Serial.println(model);
+          return;
+        }
+        
+        case 'p':  // option:  -p              print the conversation as JSON
+          serializeJsonPretty(messageDoc, Serial);
           Serial.print("\n");
           return;
 
-        default:
-          if (input.substring(0, 6) == "--help") {
+        default: {
+          input.concat(" ");
+          const String option = input.substring(0, input.indexOf(' '));
+          if (option == "--help") {
             displayHelp();
+            return;
+          } else if (option == "--get-models") { // display the github ai models from https://models.github.ai/catalog/models
+            fetchModels();
             return;
           }
 
           Serial.print("Invalid option: ");
-          Serial.println(input);
+          Serial.println(option);
           Serial.println("\nUse --help for help");
           return;
+        }
       }
       break;
 
     case '"': // Use a double quote at the start of the message to send exactly how it's written
       input.remove(0, 1); // Remove the qoute at the start of the string
     default:
-      addMessage(inputDoc, "user", input.c_str());
+      addMessage(messageDoc, "user", input.c_str());
   }
   
   setupHttp();
-  Serial.println("Sending request");
 
   String postData;
-  serializeJson(inputDoc, postData);
-  int code = http.POST(postData);
+  serializeJson(messageDoc, postData);
 
-  if (code >= 200 && code < 300) {
+  Serial.println("Sending request");
+  int httpCode = http.POST(postData);
+
+  if (httpCode >= 200 && httpCode < 300) {
     String response = http.getString();
 
-    JsonDocument outputDoc;
-    DeserializationError error = deserializeJson(outputDoc, response);
+    JsonDocument responseDoc;
+    DeserializationError error = deserializeJson(responseDoc, response);
 
     if (error) {
       Serial.print("JSON parse failed: ");
@@ -128,36 +165,91 @@ void loop() {
       return;
     }
 
-    const char* content = outputDoc["choices"][0]["message"]["content"];
+    const char* content = responseDoc["choices"][0]["message"]["content"];
 
     Serial.print("Response: ");
-    Serial.println(code);
+    Serial.println(httpCode);
     Serial.println(content);
 
-    addMessage(inputDoc, "assistant", content);
-  } else if (code > 0) {
+    addMessage(messageDoc, "assistant", content);
+  } else if (httpCode > 0) {
     Serial.print("Response Error: ");
-    Serial.println(code);
+    Serial.println(httpCode);
     Serial.println("Data sent: ");
-    serializeJsonPretty(inputDoc, Serial);
+    serializeJsonPretty(messageDoc, Serial);
     Serial.print("\n");
   } else {
     Serial.print("Connection Error: ");
-    Serial.println(code);
-    Serial.println(http.errorToString(code));
+    Serial.println(httpCode);
+    Serial.println(http.errorToString(httpCode));
   }
 
   http.end();
 }
 
-void setupWifi(const char* ssid, const char* password) {
+bool setupWifi(const char* ssid, const char* password) {
   Serial.println("\nConnecting to WiFi");
+  WiFi.disconnect(true);
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
+  const int beginTime = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - beginTime < 20000) { // 20 second connection timeout
     delay(100);
     Serial.print(".");
   }
-  Serial.println("\nConnected to WiFi");
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nConnected to WiFi");
+    return true;
+  }
+
+  Serial.println("\nConnection failed");
+  return false;
+}
+
+void ScanWiFi() {
+  Serial.println("-------------------------------------");
+  Serial.println("Scan start");
+  WiFi.disconnect(true);
+  WiFi.STA.begin();
+  // WiFi.scanNetworks will return the number of networks found.
+  int n = WiFi.scanNetworks();
+  Serial.println("Scan done");
+  if (n == 0) {
+    Serial.println("no networks found");
+  } else {
+    Serial.print(n);
+    Serial.println(" networks found");
+    Serial.println("Nr | SSID                             | RSSI | CH | Encryption");
+    for (int i = 0; i < n; ++i) {
+      // Print SSID and RSSI for each network found
+      Serial.printf("%2d", i + 1);
+      Serial.print(" | ");
+      Serial.printf("%-32.32s", WiFi.SSID(i).c_str());
+      Serial.print(" | ");
+      Serial.printf("%4ld", WiFi.RSSI(i));
+      Serial.print(" | ");
+      Serial.printf("%2ld", WiFi.channel(i));
+      Serial.print(" | ");
+      switch (WiFi.encryptionType(i)) {
+        case WIFI_AUTH_OPEN:            Serial.print("open"); break;
+        case WIFI_AUTH_WEP:             Serial.print("WEP"); break;
+        case WIFI_AUTH_WPA_PSK:         Serial.print("WPA"); break;
+        case WIFI_AUTH_WPA2_PSK:        Serial.print("WPA2"); break;
+        case WIFI_AUTH_WPA_WPA2_PSK:    Serial.print("WPA+WPA2"); break;
+        case WIFI_AUTH_WPA2_ENTERPRISE: Serial.print("WPA2-EAP"); break;
+        case WIFI_AUTH_WPA3_PSK:        Serial.print("WPA3"); break;
+        case WIFI_AUTH_WPA2_WPA3_PSK:   Serial.print("WPA2+WPA3"); break;
+        case WIFI_AUTH_WAPI_PSK:        Serial.print("WAPI"); break;
+        default:                        Serial.print("unknown");
+      }
+      Serial.println();
+      delay(10);
+    }
+  }
+
+  // Delete the scan result to free memory for code below.
+  WiFi.scanDelete();
+  Serial.println("-------------------------------------");
 }
 
 /**
@@ -171,6 +263,11 @@ void setupHttp() {
   http.addHeader("Authorization", String("Bearer ") + API_TOKEN);
 }
 
+/**
+ * @brief Gets input from serial
+ * 
+ * @param message Sends the specified message before getting input. Sends a nothing if no parameters specified.
+ */
 String getInput(const char* message) {
   Serial.println(message);
 
@@ -179,10 +276,13 @@ String getInput(const char* message) {
   return Serial.readString();
 }
 
-void setupInputDoc() {
-  inputDoc.clear();
-  inputDoc["model"] = "openai/gpt-4o-mini";
-  inputDoc["messages"].to<JsonArray>();
+/**
+ * Resets messageDoc for a blank conversation
+ */
+void setupMessageDoc() {
+  messageDoc.clear();
+  messageDoc["model"] = model;
+  messageDoc["messages"].to<JsonArray>();
 }
 
 void addMessage(JsonDocument& doc, const char* role, const char* content) {
@@ -209,6 +309,45 @@ int removeMessages(JsonDocument& doc, int count) {
   return messagesDeleted;
 }
 
+void fetchModels() {
+  http.begin("https://models.github.ai/catalog/models");
+  int httpCode = http.GET();
+
+  if (httpCode >= 200 && httpCode < 300) {
+    String response = http.getString();
+
+    JsonDocument responseDoc;
+    DeserializationError error = deserializeJson(responseDoc, response);
+
+    if (error) {
+      Serial.print("JSON parse failed: ");
+      Serial.println(error.c_str());
+      return;
+    }
+
+    JsonArray models = responseDoc.as<JsonArray>();
+
+    Serial.println("Model IDs and rate_limit_tier:");
+    for (JsonObject model : models) {
+      const char* id = model["id"];
+      const char* tier = model["rate_limit_tier"];
+      Serial.print("ID: ");
+      Serial.print(id);
+      Serial.print("  |  Tier: ");
+      Serial.println(tier);
+    }
+  } else if (httpCode > 0) {
+    Serial.print("Response Error: ");
+    Serial.println(httpCode);
+  } else {
+    Serial.print("Connection Error: ");
+    Serial.println(httpCode);
+    Serial.println(http.errorToString(httpCode));
+  }
+
+  http.end();
+}
+
 void displayHelp() {
   Serial.print(
     "Welcome to esp32-ChatGPT\n"
@@ -216,6 +355,8 @@ void displayHelp() {
     "  (-h | --help)\n"
     "  (-c | -p)\n"
     "  -r [<count>]\n"
+    "  -m [<model>]\n"
+    "  --get-models\n"
     "  [-u | -d | -a | \"] <message>\n"
     "  <message>\n"
     "\n"
@@ -223,13 +364,15 @@ void displayHelp() {
     "  -h | --help     display this help text\n"
     "  -c              reset the conversation\n"
     "  -r [<count>]    remove the specified number of elements (default 1)\n"
+    "  -m [<model>]    set the ai model (omit argument to display the current model)\n"
+    "  --get-models    display github ai models from https://models.github.ai/catalog/models\n"
     "  -p              print the conversation as JSON\n"
     "  -u              add a message as a user\n"
     "  -d              add a message as a developer\n"
     "  -a              add a message as the ai (assistant)\n"
     "  \"               send a message exactly how it's written\n"
     "\n"
-    "Note: If you use -u, -d, or -u, it won't send a request to ChatGPT,\n"
+    "Note: If you use -u, -d, or -a, it won't send a request to ChatGPT,\n"
     "      but a quote will still send the request\n"
     "\n"
     "Examples:\n"
